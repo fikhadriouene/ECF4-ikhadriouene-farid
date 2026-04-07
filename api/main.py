@@ -1,114 +1,262 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
+import logging
 import re
+from typing import List
+
 import joblib
 import nltk
-import os
-from nltk.tokenize import word_tokenize
+import numpy as np
+from fastapi import FastAPI, HTTPException, status
+from pydantic import BaseModel, Field, ConfigDict
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize
 from tensorflow.keras.models import load_model
 
-# --- INITIALISATION DES RESSOURCES ---
-# Téléchargement des ressources NLTK nécessaires au fonctionnement de clean_title
 nltk.download("punkt", quiet=True)
 nltk.download("stopwords", quiet=True)
 nltk.download("wordnet", quiet=True)
-nltk.download('punkt_tab')
 
-app = FastAPI(title="Fake News Detector", version="1.0.0")
-
-# Gestion dynamique des chemins (indépendant du répertoire de lancement)
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "best_model.keras")
-VECT_PATH = os.path.join(BASE_DIR, "models", "vectorizer.pkl")
-
-# Chargement unique au démarrage
-try:
-    vectorizer = joblib.load(VECT_PATH)
-    model = load_model(MODEL_PATH)
-    print("Succès : Modèle et Vectoriseur chargés.")
-except Exception as e:
-    print(f"Erreur critique de chargement : {e}")
-
-stop_words = set(stopwords.words("english"))
+english_stopwords = set(stopwords.words("english"))
 lemmatizer = WordNetLemmatizer()
 
-def clean_title(text: str) -> str:
-    """Fonction de nettoyage identique à la phase d'entraînement."""
-    text = str(text).lower()
-    text = re.sub(r'http\S+|www\S+', '', text)
-    text = re.sub(r"[^a-zA-Z\s']", " ", text)
-    tokens = word_tokenize(text)
-    tokens = [lemmatizer.lemmatize(t, pos="v") for t in tokens if t not in stop_words and len(t) >= 2]
-    return " ".join(tokens)
 
-# --- MODÈLES DE DONNÉES (VALIDATION) ---
+# Configuration des logs
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+
+# Création de l'application FastAPI
+
+app = FastAPI(
+    title="Fake News Detection API",
+    description="API REST de détection de fake news à partir de titres d'articles.",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
+
+
+# Chargement du vectorizer et du modèle au démarrage
+
+try:
+    tfidf_vectorizer = joblib.load("./models/vectorizer.pkl")
+    fake_news_model = load_model("./models/best_model.keras")
+    logger.info("Modèle et vectorizer chargés avec succès.")
+except Exception as error:
+    logger.exception("Erreur de chargement des ressources")
+    fake_news_model = None
+    tfidf_vectorizer = None
+
+
+# Schémas Pydantic
+
 class PredictRequest(BaseModel):
-    title: str = Field(..., description="Le titre de l'article à analyser")
+    title: str = Field(
+        ...,
+        description="Titre d'article à analyser",
+        examples=["Scientists discover new treatment"],
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "title": "Scientists discover new treatment"
+            }
+        }
+    )
+
+
+class PredictResponse(BaseModel):
+    title: str = Field(..., description="Titre reçu par l'API")
+    label: str = Field(..., description="Classe prédite : REAL ou FAKE", examples=["REAL"])
+    confidence: float = Field(..., description="Score de confiance entre 0 et 1", examples=[0.87])
+
 
 class BatchRequest(BaseModel):
-    titles: list[str] = Field(..., description="Liste de titres (max 50)")
+    titles: List[str] = Field(
+        ...,
+        description="Liste de titres à analyser",
+        examples=[["Scientists discover new treatment", "Government announces major reform"]],
+    )
 
-# --- ENDPOINTS ---
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "model": "fake_news_detector"}
-
-@app.post("/predict")
-async def predict(data: PredictRequest):
-    # Gestion des cas limites : Titre vide ou espaces
-    if not data.title.strip():
-        raise HTTPException(status_code=422, detail="Le titre ne peut pas être vide ou composé uniquement d'espaces.")
-    
-    # Gestion des cas limites : Longueur max
-    if len(data.title) > 300:
-        raise HTTPException(status_code=400, detail="Le titre dépasse la limite autorisée de 300 caractères.")
-
-    try:
-        # Pipeline de prédiction
-        text_clean = clean_title(data.title)
-        vector = vectorizer.transform([text_clean]).toarray()
-        
-        # Inférence
-        score = float(model.predict(vector, verbose=0)[0][0])
-        
-        # Formatage de la réponse
-        label = "REAL" if score >= 0.5 else "FAKE"
-        confidence = score if score >= 0.5 else 1 - score
-
-        return {
-            "title": data.title,
-            "label": label,
-            "confidence": round(confidence, 2)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "titles": [
+                    "Scientists discover new treatment",
+                    "Government announces major reform"
+                ]
+            }
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur interne lors de la prédiction : {str(e)}")
+    )
 
-@app.post("/predict/batch")
-async def predict_batch(data: BatchRequest):
-    # Gestion des cas limites : Liste vide ou > 50
-    if not data.titles or len(data.titles) > 50:
-        raise HTTPException(status_code=400, detail="La liste doit contenir entre 1 et 50 titres.")
 
-    results = []
-    for title in data.titles:
-        if not title.strip() or len(title) > 300:
-            # On ignore les titres invalides dans un batch ou on pourrait lever une erreur
-            continue
-            
-        text_clean = clean_title(title)
-        vector = vectorizer.transform([text_clean]).toarray()
-        score = float(model.predict(vector, verbose=0)[0][0])
-        
-        label = "REAL" if score >= 0.5 else "FAKE"
-        confidence = score if score >= 0.5 else 1 - score
-        
-        results.append({
-            "title": title,
-            "label": label,
-            "confidence": round(confidence, 2)
-        })
+class BatchResponse(BaseModel):
+    predictions: List[PredictResponse]
 
-    return {"predictions": results}
+
+class HealthResponse(BaseModel):
+    status: str
+    model: str
+
+
+
+# Fonction de nettoyage du texte 
+def clean_title(raw_title: str) -> str:
+
+    title_lowercase = raw_title.lower().strip()
+    title_without_urls = re.sub(r"http\S+|www\S+", " ", title_lowercase)
+    title_letters_only = re.sub(r"[^a-zA-Z\s']", " ", title_without_urls)
+
+    tokens = word_tokenize(title_letters_only)
+
+    cleaned_tokens = [
+        lemmatizer.lemmatize(token)
+        for token in tokens
+        if token not in english_stopwords and len(token) > 1
+    ]
+
+    cleaned_title = " ".join(cleaned_tokens)
+    return cleaned_title
+
+
+
+# Validation métier d'un titre
+
+def validate_title(title: str) -> None:
+    if title.strip() == "" :
+        raise HTTPException(
+            status_code=422,
+            detail="Le titre ne peut pas être vide ou composé uniquement d'espaces."
+        )
+
+    if len(title) > 300:
+        raise HTTPException(
+            status_code=400,
+            detail="Le titre dépasse 300 caractères."
+        )
+
+
+
+# Vérification du chargement du modèle et du vectorizer
+
+def verify_model_vectorizer_loaded() -> None:
+
+    if fake_news_model is None or tfidf_vectorizer is None:
+        raise HTTPException(
+            # status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=500,
+            detail="Le modèle ou le vectorizer n'est pas disponible."
+        )
+
+
+
+# Fonction principale de prédiction
+
+def predict_title(title: str) -> PredictResponse:
+
+    verify_model_vectorizer_loaded()
+
+    cleaned_title = clean_title(title)
+
+    # Transformation du texte en vecteur numérique
+    title_vector = tfidf_vectorizer.transform([cleaned_title]).toarray()
+    print(tfidf_vectorizer)
+    # Prédiction du score par le modèle
+    raw_prediction = fake_news_model.predict(title_vector, verbose=0)
+    
+
+    # On récupère la probabilité sous forme de float
+    real_probability_score = float(np.asarray(raw_prediction).ravel()[0])
+
+
+    # règle de décision : si le score est >= 0.5 alors REAL, sinon FAKE
+    predicted_label = "REAL" if real_probability_score >= 0.5 else "FAKE"
+
+    # La confiance correspond au score de la classe prédite
+    prediction_confidence = (
+        real_probability_score if predicted_label == "REAL"
+        else 1 - real_probability_score
+    )
+
+    return PredictResponse(
+        title=title,
+        label=predicted_label,
+        confidence=round(prediction_confidence, 2)
+    )
+
+
+
+# Endpoint de santé
+
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["Health"],
+    summary="Vérifier l'état de l'API",
+    status_code=status.HTTP_200_OK,
+)
+async def health() -> HealthResponse:
+    """
+    Retourne l'état de l'API.
+    """
+    return HealthResponse(status="ok", model="fake_news_detector")
+
+
+# Endpoint de prédiction unitaire
+
+@app.post(
+    "/predict",
+    response_model=PredictResponse,
+    tags=["Prediction"],
+    summary="Prédire un titre",
+    status_code=status.HTTP_200_OK,
+)
+async def predict(payload: PredictRequest) -> PredictResponse:
+    """
+    Reçoit un seul titre et retourne :
+    - le titre reçu
+    - le label prédit
+    - le score de confiance
+    """
+    validate_title(payload.title)
+    return predict_title(payload.title)
+
+
+
+# Endpoint de prédiction par lot
+
+@app.post(
+    "/predict/batch",
+    response_model=BatchResponse,
+    tags=["Prediction"],
+    summary="Prédire une liste de titres",
+    status_code=status.HTTP_200_OK,
+)
+async def predict_titles(payload: BatchRequest) -> BatchResponse:
+
+    if len(payload.titles) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La liste de titres ne peut pas être vide."
+        )
+
+    if len(payload.titles) > 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La liste de titres ne peut pas dépasser 50 éléments."
+        )
+
+    batch_predictions = []
+
+    for current_title in payload.titles:
+        validate_title(current_title)
+        single_prediction = predict_title(current_title)
+        batch_predictions.append(single_prediction)
+
+    return BatchResponse(predictions=batch_predictions)
