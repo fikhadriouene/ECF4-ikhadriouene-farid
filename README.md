@@ -32,27 +32,55 @@ L’objectif est de concevoir un système capable de prédire à partir d'un tit
 # Structure du projet
 
 ECF4/
+
 │
+
 ├── api/
+
 │   └── main.py
+
 │
+
 ├── data/
+
 │   ├── news.csv
+
 │   └── titles_clean.csv
+
 │
+
 ├── models/
+
 │   ├── best_model.keras
+
 │   ├── best_model_ameliore.keras
+
 │   ├── best_model_bilstm.keras
+
 │   ├── best_model_bilstm_ameliore.keras
+
 │   └── vectorizer.pkl
+
 │
+
 ├── notebook/
+
 │   └── ecf_fake_news.ipynb
+
 │
+
+├── docker-compose.yml
+
+├── Dockerfile
+
 ├── requirements.txt
+
+├── README_DOCKER.txt
+
 ├── sujet.md
+
 ├── Rapport.md
+
 └── README.md
 
 ------------------------------------------------------------------------
@@ -76,7 +104,9 @@ ECF4/
 
 # Lancement
 A la racine du projet exécuter :
+
   docker-compose up -d :
+
     - Chargement des librairies nécessaires
     - Exécution du notebook ecf_fake_news.ipynb pour la création du best_model et vectorizer
     - Exécution du main.py qui lance l'api
